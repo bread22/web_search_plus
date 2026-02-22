@@ -89,7 +89,7 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 | `providers[].type` | string | Yes | `brave`, `tavily`, or `custom` |
 | `providers[].apiKeyEnv` | string | Yes | Env var name containing API key |
 | `providers[].monthlyLimit` | number | Yes | Maximum requests per month |
-| `providers[].baseUrl` | string | No | Custom API URL (only for type=`custom`) |
+| `providers[].baseUrl` | string | No | Custom API URL (only for type=`custom` - not needed for built-in providers) |
 | `primaryProviderId` | string | No | ID of primary provider (default: first provider) |
 
 ## Built-in Providers
