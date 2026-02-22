@@ -3,7 +3,7 @@ const USAGE_FILE = process.env.HOME + "/.openclaw/data/web_search_plus_usage.jso
 interface ProviderConfig {
   id: string;
   type: string;
-  apiKeyEnv: string;
+  apiKey: string;
   monthlyLimit: number;
   baseUrl?: string;
 }
@@ -145,18 +145,19 @@ function incrementUsage(providerId: string): void {
   saveUsage();
 }
 
-function getApiKey(envVar: string, fallbackPath?: string): string {
+function getApiKey(apiKeyValue: string): string {
   const fs = require("fs");
   
-  if (process.env[envVar]) {
-    return process.env[envVar];
+  if (apiKeyValue.startsWith("${") && apiKeyValue.endsWith("}")) {
+    const envVar = apiKeyValue.slice(2, -1);
+    return process.env[envVar] || "";
   }
   
-  if (fallbackPath && fs.existsSync(fallbackPath)) {
-    return fs.readFileSync(fallbackPath, "utf-8").trim();
+  if (fs.existsSync(apiKeyValue)) {
+    return fs.readFileSync(apiKeyValue, "utf-8").trim();
   }
   
-  return "";
+  return apiKeyValue;
 }
 
 export default function (api: {
@@ -212,7 +213,7 @@ export default function (api: {
           continue;
         }
 
-        const apiKey = getApiKey(provider.apiKeyEnv, provider.apiKeyEnv);
+        const apiKey = getApiKey(provider.apiKey);
         if (!apiKey) {
           api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id} (env: ${provider.apiKeyEnv})`);
           continue;

@@ -5,24 +5,23 @@
   "version": "1.0.0",
   "configSchema": {
     "type": "object",
-    "additionalProperties": false,
+    "additionalProperties": true,
     "properties": {
       "providers": {
         "type": "array",
         "items": {
           "type": "object",
-          "additionalProperties": false,
+          "additionalProperties": true,
           "properties": {
-            "id": { "type": "string", "description": "Unique provider identifier" },
-            "type": { "type": "string", "enum": ["brave", "tavily", "custom"], "description": "Provider type" },
-            "apiKeyEnv": { "type": "string", "description": "Environment variable name containing API key" },
-            "monthlyLimit": { "type": "number", "description": "Monthly request limit" },
-            "baseUrl": { "type": "string", "description": "Custom provider API URL (only for type=custom)" }
-          },
-          "required": ["id", "type", "apiKeyEnv", "monthlyLimit"]
+            "id": { "type": "string" },
+            "type": { "type": "string" },
+            "apiKey": { "type": "string" },
+            "monthlyLimit": { "type": "number" },
+            "baseUrl": { "type": "string" }
+          }
         }
       },
-      "primaryProviderId": { "type": "string", "description": "ID of primary provider (tried first)" }
+      "primaryProviderId": { "type": "string" }
     }
   }
 }
