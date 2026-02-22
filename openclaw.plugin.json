@@ -1,0 +1,28 @@
+{
+  "id": "web_search_plus",
+  "name": "Web Search Plus",
+  "description": "Multi-provider web search with fallback and monthly usage limits",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "providers": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": { "type": "string", "description": "Unique provider identifier" },
+            "type": { "type": "string", "enum": ["brave", "tavily", "custom"], "description": "Provider type" },
+            "apiKeyEnv": { "type": "string", "description": "Environment variable name containing API key" },
+            "monthlyLimit": { "type": "number", "description": "Monthly request limit" },
+            "baseUrl": { "type": "string", "description": "Custom provider API URL (only for type=custom)" }
+          },
+          "required": ["id", "type", "apiKeyEnv", "monthlyLimit"]
+        }
+      },
+      "primaryProviderId": { "type": "string", "description": "ID of primary provider (tried first)" }
+    }
+  }
+}
