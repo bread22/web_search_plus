@@ -1,4 +1,9 @@
-const USAGE_FILE = process.env.HOME + "/.openclaw/data/web_search_plus_usage.json";
+const os = require("os");
+const path = require("path");
+const { resolveApiKey, sanitizeErrorMessage } = require("./security.js");
+const { readUsageFile, writeUsageFileAtomic } = require("./reliability.js");
+
+const USAGE_FILE = path.join(os.homedir(), ".openclaw/data/web_search_plus_usage.json");
 const MAX_QUERY_LENGTH = 500;
 const MAX_COUNT = 20;
 const MIN_COUNT = 1;
@@ -30,6 +35,8 @@ const providerRegistry: ProviderRegistry = {
         Accept: "application/json",
         "X-Subscription-Token": apiKey,
       },
+      redirect: "error",
+      signal: AbortSignal.timeout(10000),
     });
     
     if (!response.ok) {
@@ -51,6 +58,8 @@ const providerRegistry: ProviderRegistry = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10000),
     });
     
     if (!response.ok) {
@@ -77,6 +86,8 @@ const providerRegistry: ProviderRegistry = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
+      redirect: "error",
+      signal: AbortSignal.timeout(10000),
     });
     
     if (!response.ok) {
@@ -96,18 +107,7 @@ function getCurrentMonth(): string {
 
 function loadUsage(): void {
   try {
-    const fs = require("fs");
-    if (fs.existsSync(USAGE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(USAGE_FILE, "utf-8"));
-      const currentMonth = getCurrentMonth();
-      for (const [providerId, info] of Object.entries(data)) {
-        if (typeof info === "object" && info.month !== currentMonth) {
-          info.count = 0;
-          info.month = currentMonth;
-        }
-      }
-      usageData = data;
-    }
+    usageData = readUsageFile(USAGE_FILE, getCurrentMonth());
   } catch {
     usageData = {};
   }
@@ -115,12 +115,7 @@ function loadUsage(): void {
 
 function saveUsage(): void {
   try {
-    const fs = require("fs");
-    const dir = USAGE_FILE.substring(0, USAGE_FILE.lastIndexOf("/"));
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(USAGE_FILE, JSON.stringify(usageData, null, 2));
+    writeUsageFileAtomic(USAGE_FILE, usageData);
   } catch {
     // ignore
   }
@@ -147,23 +142,6 @@ function incrementUsage(providerId: string): void {
   }
   usageData[providerId].count++;
   saveUsage();
-}
-
-function getApiKey(apiKeyValue: string): string {
-  const rawValue = (apiKeyValue || "").trim();
-
-  if (!rawValue) {
-    return "";
-  }
-
-  // Support only literal values and ${ENV_VAR} indirection.
-  // File-path loading is intentionally disabled for security hardening.
-  if (rawValue.startsWith("${") && rawValue.endsWith("}")) {
-    const envVar = rawValue.slice(2, -1).trim();
-    return envVar ? (process.env[envVar] || "").trim() : "";
-  }
-
-  return rawValue;
 }
 
 function isPrivateOrLoopbackIp(hostname: string): boolean {
@@ -378,7 +356,7 @@ export default function (api: {
           continue;
         }
 
-        const apiKey = getApiKey(provider.apiKey);
+        const apiKey = resolveApiKey(provider as unknown as { apiKey?: string; apiKeyEnv?: string });
         if (!apiKey) {
           api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id}; skipping`);
           continue;
@@ -395,8 +373,9 @@ export default function (api: {
 
           return { content: [{ type: "text", text: JSON.stringify({ provider: provider.id, query, ...(result as object) }, null, 2) }] };
         } catch (err) {
-          lastError = err instanceof Error ? err : new Error(String(err));
-          api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${lastError.message}`);
+          const safeMessage = sanitizeErrorMessage(err);
+          lastError = new Error(safeMessage);
+          api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${safeMessage}`);
           continue;
         }
       }
