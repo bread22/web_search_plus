@@ -1,4 +1,11 @@
 const USAGE_FILE = process.env.HOME + "/.openclaw/data/web_search_plus_usage.json";
+const {
+  clampCount,
+  sanitizeTimeoutMs,
+  validateCustomBaseUrl,
+  resolveApiKey,
+  sanitizeErrorMessage,
+} = require("./security");
 
 interface ProviderConfig {
   id: string;
@@ -7,6 +14,8 @@ interface ProviderConfig {
   apiKey?: string;
   monthlyLimit: number;
   baseUrl?: string;
+  timeoutMs?: number;
+  allowedHosts?: string[];
 }
 
 interface SearchFunction {
@@ -17,17 +26,36 @@ interface ProviderRegistry {
   [key: string]: SearchFunction;
 }
 
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), sanitizeTimeoutMs(timeoutMs));
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("Request timed out");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const providerRegistry: ProviderRegistry = {
   brave: async (apiKey: string, query: string, count: number, extras?: Record<string, unknown>): Promise<unknown> => {
     const params = new URLSearchParams({ q: query, count: String(count) });
     if (extras?.freshness) params.append("freshness", String(extras.freshness));
     
-    const response = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
-      headers: {
-        Accept: "application/json",
-        "X-Subscription-Token": apiKey,
+    const response = await fetchWithTimeout(
+      `https://api.search.brave.com/res/v1/web/search?${params}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Subscription-Token": apiKey,
+        },
       },
-    });
+      extras?.timeoutMs as number,
+    );
     
     if (!response.ok) {
       throw new Error(`Brave API error: ${response.status}`);
@@ -43,12 +71,16 @@ const providerRegistry: ProviderRegistry = {
     };
   },
   
-  tavily: async (apiKey: string, query: string, count: number): Promise<unknown> => {
-    const response = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
-    });
+  tavily: async (apiKey: string, query: string, count: number, extras?: Record<string, unknown>): Promise<unknown> => {
+    const response = await fetchWithTimeout(
+      "https://api.tavily.com/search",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
+      },
+      extras?.timeoutMs as number,
+    );
     
     if (!response.ok) {
       throw new Error(`Tavily API error: ${response.status}`);
@@ -70,11 +102,15 @@ const providerRegistry: ProviderRegistry = {
       throw new Error("Custom provider requires baseUrl");
     }
     
-    const response = await fetch(baseUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
-    });
+    const response = await fetchWithTimeout(
+      baseUrl,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
+      },
+      extras?.timeoutMs as number,
+    );
     
     if (!response.ok) {
       throw new Error(`Custom provider error: ${response.status}`);
@@ -146,43 +182,6 @@ function incrementUsage(providerId: string): void {
   saveUsage();
 }
 
-function getApiKey(apiKeyValue: unknown): string {
-  if (typeof apiKeyValue !== "string") {
-    return "";
-  }
-
-  const rawValue = apiKeyValue.trim();
-  if (!rawValue) {
-    return "";
-  }
-
-  const fs = require("fs");
-  
-  if (rawValue.startsWith("${") && rawValue.endsWith("}")) {
-    const envVar = rawValue.slice(2, -1).trim();
-    if (!envVar) {
-      return "";
-    }
-    return process.env[envVar] || "";
-  }
-  
-  if (fs.existsSync(rawValue)) {
-    return fs.readFileSync(rawValue, "utf-8").trim();
-  }
-  
-  return rawValue;
-}
-
-function resolveApiKey(provider: ProviderConfig): string {
-  if (typeof provider.apiKeyEnv === "string" && provider.apiKeyEnv.trim()) {
-    const envValue = process.env[provider.apiKeyEnv.trim()];
-    if (typeof envValue === "string" && envValue.trim()) {
-      return envValue.trim();
-    }
-  }
-  return getApiKey(provider.apiKey);
-}
-
 export default function (api: {
   config: Record<string, unknown>;
   pluginConfig?: Record<string, unknown>;
@@ -194,6 +193,7 @@ export default function (api: {
   const config = api.pluginConfig as {
     providers?: ProviderConfig[];
     primaryProviderId?: string;
+    allowedHosts?: string[];
   } | undefined;
 
   const providers: ProviderConfig[] = config?.providers || [];
@@ -219,7 +219,7 @@ export default function (api: {
     },
     async execute(_toolCallId: string, params: Record<string, unknown>) {
       const query = typeof params.query === "string" ? params.query.trim() : "";
-      const count = typeof params.count === "number" ? params.count : 10;
+      const count = clampCount(params.count);
       const freshness = typeof params.freshness === "string" ? params.freshness : undefined;
 
       if (!query) {
@@ -232,35 +232,48 @@ export default function (api: {
         const currentUsage = getUsage(provider.id);
         
         if (currentUsage >= provider.monthlyLimit) {
-          api.logger?.info(`[web_search_plus] Provider ${provider.id} at limit (${currentUsage}/${provider.monthlyLimit}), skipping`);
+          api.logger?.info(`[web_search_plus] Provider ${provider.id} at monthly limit`);
           continue;
         }
 
         const apiKey = resolveApiKey(provider);
         if (!apiKey) {
-          const keySource = provider.apiKeyEnv && provider.apiKey ? `apiKeyEnv=${provider.apiKeyEnv} or apiKey` : provider.apiKeyEnv ? `apiKeyEnv=${provider.apiKeyEnv}` : "apiKey";
-          api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id} (${keySource})`);
+          api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id}`);
           continue;
         }
 
         try {
           const searchFn = providerRegistry[provider.type] || providerRegistry.custom;
-          const extras = provider.type === "custom" ? { baseUrl: provider.baseUrl } : { freshness };
+          const timeoutMs = sanitizeTimeoutMs(provider.timeoutMs);
+          const extras =
+            provider.type === "custom"
+              ? {
+                  baseUrl: validateCustomBaseUrl(provider.baseUrl, config?.allowedHosts, provider.allowedHosts),
+                  timeoutMs,
+                }
+              : { freshness, timeoutMs };
           
           const result = await searchFn(apiKey, query, count, extras);
 
           incrementUsage(provider.id);
-          api.logger?.info(`[web_search_plus] Used ${provider.id}, count: ${getUsage(provider.id)}/${provider.monthlyLimit}`);
+          api.logger?.info(`[web_search_plus] Used ${provider.id}`);
 
           return { content: [{ type: "text", text: JSON.stringify({ provider: provider.id, query, ...(result as object) }, null, 2) }] };
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
-          api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${lastError.message}`);
+          api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${sanitizeErrorMessage(lastError)}`);
           continue;
         }
       }
 
-      return { content: [{ type: "text", text: JSON.stringify({ error: "All providers failed or at limit", lastError: lastError?.message })}] };
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ error: "All providers failed or at limit", lastError: lastError ? sanitizeErrorMessage(lastError) : undefined }),
+          },
+        ],
+      };
     },
   });
 

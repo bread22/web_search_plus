@@ -91,7 +91,10 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 | `providers[].apiKey` | string | No | Direct API key value, `${ENV_VAR}` syntax, or path to file containing key |
 | `providers[].monthlyLimit` | number | Yes | Maximum requests per month |
 | `providers[].baseUrl` | string | No | Custom API URL (only for type=`custom` - not needed for built-in providers) |
+| `providers[].timeoutMs` | number | No | Provider request timeout in milliseconds (default: 8000) |
+| `providers[].allowedHosts` | string[] | No | Provider-level allowlist for custom provider hostnames (overrides global allowlist when set) |
 | `primaryProviderId` | string | No | ID of primary provider (default: first provider) |
+| `allowedHosts` | string[] | No | Global allowlist for custom provider hostnames |
 
 ## Built-in Providers
 
@@ -129,6 +132,11 @@ The custom provider sends POST request with:
   "api_key": "your-key"
 }
 ```
+
+Security behavior:
+- `baseUrl` must use `https://`
+- if `allowedHosts` is configured (global or provider-level), hostname must be on the allowlist
+- `count` is clamped to `1..20`
 
 ## Usage
 

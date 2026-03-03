@@ -18,12 +18,21 @@
             "apiKeyEnv": { "type": "string" },
             "apiKey": { "type": "string" },
             "monthlyLimit": { "type": "number" },
-            "baseUrl": { "type": "string" }
+            "baseUrl": { "type": "string" },
+            "timeoutMs": { "type": "number" },
+            "allowedHosts": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           },
           "required": ["id", "type", "monthlyLimit"]
         }
       },
-      "primaryProviderId": { "type": "string" }
+      "primaryProviderId": { "type": "string" },
+      "allowedHosts": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
     }
   }
 }
