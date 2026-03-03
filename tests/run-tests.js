@@ -9,6 +9,14 @@ const {
   resolveApiKey,
   validateCustomBaseUrl,
 } = require("../security");
+const {
+  readUsageFile,
+  writeUsageFileAtomic,
+  DEFAULT_PROVIDER_COOLDOWN_MS,
+  sanitizeCooldownMs,
+  markProviderUnhealthy,
+  isProviderHealthy,
+} = require("../reliability");
 
 function test(name, fn) {
   try {
@@ -93,6 +101,46 @@ test("provider allowlist overrides global allowlist", () => {
     ["provider-only.example.com"],
   );
   assert.equal(url, "https://provider-only.example.com/search");
+});
+
+test("corrupt usage file is handled gracefully", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wsp-usage-"));
+  const usagePath = path.join(dir, "usage.json");
+  fs.writeFileSync(usagePath, '{"broken": ');
+  const loaded = readUsageFile(usagePath, "2026-03");
+  assert.deepEqual(loaded, {});
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("atomic usage write keeps old file when rename fails", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wsp-usage-"));
+  const usagePath = path.join(dir, "usage.json");
+  fs.writeFileSync(usagePath, JSON.stringify({ brave: { count: 1, month: "2026-03" } }));
+
+  const fsMock = {
+    ...fs,
+    renameSync() {
+      throw new Error("rename failed");
+    },
+  };
+
+  assert.throws(
+    () => writeUsageFileAtomic(usagePath, { brave: { count: 2, month: "2026-03" } }, fsMock),
+    /rename failed/,
+  );
+  const current = JSON.parse(fs.readFileSync(usagePath, "utf-8"));
+  assert.equal(current.brave.count, 1);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("provider cooldown skips and recovers after window", () => {
+  const health = {};
+  const now = 1_000;
+  const cooldown = sanitizeCooldownMs(undefined, DEFAULT_PROVIDER_COOLDOWN_MS);
+  const unhealthyUntil = markProviderUnhealthy(health, "brave", cooldown, now);
+  assert.equal(unhealthyUntil, now + DEFAULT_PROVIDER_COOLDOWN_MS);
+  assert.equal(isProviderHealthy(health, "brave", now + DEFAULT_PROVIDER_COOLDOWN_MS - 1), false);
+  assert.equal(isProviderHealthy(health, "brave", now + DEFAULT_PROVIDER_COOLDOWN_MS), true);
 });
 
 process.on("exit", () => {

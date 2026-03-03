@@ -7,6 +7,7 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 - **Multi-provider support**: Configure multiple search providers (Brave, Tavily, or custom)
 - **Automatic fallback**: When primary provider hits limit, automatically falls back to next provider
 - **Monthly usage tracking**: Usage resets automatically at the start of each month
+- **Failure cooldown**: Providers that fail with timeout/429/5xx are temporarily skipped
 - **Extensible**: Add any HTTP-based search API as a custom provider
 - **Flexible auth config**: API keys can come from `apiKeyEnv` or `apiKey` (literal value, `${ENV_VAR}`, or file path)
 
@@ -92,8 +93,10 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 | `providers[].monthlyLimit` | number | Yes | Maximum requests per month |
 | `providers[].baseUrl` | string | No | Custom API URL (only for type=`custom` - not needed for built-in providers) |
 | `providers[].timeoutMs` | number | No | Provider request timeout in milliseconds (default: 8000) |
+| `providers[].cooldownMs` | number | No | Override failure cooldown for this provider in milliseconds |
 | `providers[].allowedHosts` | string[] | No | Provider-level allowlist for custom provider hostnames (overrides global allowlist when set) |
 | `primaryProviderId` | string | No | ID of primary provider (default: first provider) |
+| `cooldownMs` | number | No | Global failure cooldown in milliseconds (default: 30000) |
 | `allowedHosts` | string[] | No | Global allowlist for custom provider hostnames |
 
 ## Built-in Providers
@@ -150,6 +153,11 @@ The plugin automatically replaces the built-in `web_search` tool. Usage:
 ## Usage Tracking
 
 Usage is stored in `~/.openclaw/data/web_search_plus_usage.json` and resets automatically at the start of each month.
+Writes are atomic (temp file + rename), and invalid/corrupt usage JSON is ignored safely.
+
+## Failure Cooldown
+
+On timeout, HTTP `429`, or HTTP `5xx` provider errors, the failing provider is marked temporarily unhealthy and skipped for the configured cooldown window. The plugin keeps fallback behavior and continues trying the next configured provider.
 
 ## License
 

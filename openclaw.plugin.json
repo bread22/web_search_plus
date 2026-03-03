@@ -20,6 +20,7 @@
             "monthlyLimit": { "type": "number" },
             "baseUrl": { "type": "string" },
             "timeoutMs": { "type": "number" },
+            "cooldownMs": { "type": "number" },
             "allowedHosts": {
               "type": "array",
               "items": { "type": "string" }
@@ -29,6 +30,7 @@
         }
       },
       "primaryProviderId": { "type": "string" },
+      "cooldownMs": { "type": "number" },
       "allowedHosts": {
         "type": "array",
         "items": { "type": "string" }

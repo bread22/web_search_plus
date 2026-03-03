@@ -6,6 +6,15 @@ const {
   resolveApiKey,
   sanitizeErrorMessage,
 } = require("./security");
+const {
+  DEFAULT_PROVIDER_COOLDOWN_MS,
+  sanitizeCooldownMs,
+  readUsageFile,
+  writeUsageFileAtomic,
+  isRetryableProviderError,
+  markProviderUnhealthy,
+  isProviderHealthy,
+} = require("./reliability");
 
 interface ProviderConfig {
   id: string;
@@ -15,6 +24,7 @@ interface ProviderConfig {
   monthlyLimit: number;
   baseUrl?: string;
   timeoutMs?: number;
+  cooldownMs?: number;
   allowedHosts?: string[];
 }
 
@@ -121,6 +131,7 @@ const providerRegistry: ProviderRegistry = {
 };
 
 let usageData: Record<string, { count: number; month: string }> = {};
+const providerUnhealthyUntil: Record<string, number> = {};
 
 function getCurrentMonth(): string {
   const now = new Date();
@@ -129,18 +140,7 @@ function getCurrentMonth(): string {
 
 function loadUsage(): void {
   try {
-    const fs = require("fs");
-    if (fs.existsSync(USAGE_FILE)) {
-      const data = JSON.parse(fs.readFileSync(USAGE_FILE, "utf-8"));
-      const currentMonth = getCurrentMonth();
-      for (const [providerId, info] of Object.entries(data)) {
-        if (typeof info === "object" && info.month !== currentMonth) {
-          info.count = 0;
-          info.month = currentMonth;
-        }
-      }
-      usageData = data;
-    }
+    usageData = readUsageFile(USAGE_FILE, getCurrentMonth());
   } catch {
     usageData = {};
   }
@@ -148,12 +148,7 @@ function loadUsage(): void {
 
 function saveUsage(): void {
   try {
-    const fs = require("fs");
-    const dir = USAGE_FILE.substring(0, USAGE_FILE.lastIndexOf("/"));
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    fs.writeFileSync(USAGE_FILE, JSON.stringify(usageData, null, 2));
+    writeUsageFileAtomic(USAGE_FILE, usageData);
   } catch {
     // ignore
   }
@@ -194,10 +189,12 @@ export default function (api: {
     providers?: ProviderConfig[];
     primaryProviderId?: string;
     allowedHosts?: string[];
+    cooldownMs?: number;
   } | undefined;
 
   const providers: ProviderConfig[] = config?.providers || [];
   const primaryProviderId = config?.primaryProviderId || providers[0]?.id;
+  const defaultCooldownMs = sanitizeCooldownMs(config?.cooldownMs, DEFAULT_PROVIDER_COOLDOWN_MS);
 
   const sortedProviders = [...providers].sort((a, b) => {
     if (a.id === primaryProviderId) return -1;
@@ -227,8 +224,14 @@ export default function (api: {
       }
 
       let lastError: Error | null = null;
+      const now = Date.now();
 
       for (const provider of sortedProviders) {
+        if (!isProviderHealthy(providerUnhealthyUntil, provider.id, now)) {
+          api.logger?.info(`[web_search_plus] Provider ${provider.id} in cooldown`);
+          continue;
+        }
+
         const currentUsage = getUsage(provider.id);
         
         if (currentUsage >= provider.monthlyLimit) {
@@ -256,12 +259,21 @@ export default function (api: {
           const result = await searchFn(apiKey, query, count, extras);
 
           incrementUsage(provider.id);
+          delete providerUnhealthyUntil[provider.id];
           api.logger?.info(`[web_search_plus] Used ${provider.id}`);
 
           return { content: [{ type: "text", text: JSON.stringify({ provider: provider.id, query, ...(result as object) }, null, 2) }] };
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
           api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${sanitizeErrorMessage(lastError)}`);
+          if (isRetryableProviderError(lastError)) {
+            const cooldownUntil = markProviderUnhealthy(
+              providerUnhealthyUntil,
+              provider.id,
+              sanitizeCooldownMs(provider.cooldownMs, defaultCooldownMs),
+            );
+            api.logger?.warn(`[web_search_plus] ${provider.id} marked unhealthy until ${new Date(cooldownUntil).toISOString()}`);
+          }
           continue;
         }
       }
