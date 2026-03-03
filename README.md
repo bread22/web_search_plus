@@ -8,7 +8,7 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 - **Automatic fallback**: When primary provider hits limit, automatically falls back to next provider
 - **Monthly usage tracking**: Usage resets automatically at the start of each month
 - **Extensible**: Add any HTTP-based search API as a custom provider
-- **Secure**: API keys stored in environment variables, not in config
+- **Flexible auth config**: API keys can come from `apiKeyEnv` or `apiKey` (literal value, `${ENV_VAR}`, or file path)
 
 ## Installation
 
@@ -87,12 +87,15 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 | `providers` | array | Yes | List of search providers |
 | `providers[].id` | string | Yes | Unique identifier for this provider |
 | `providers[].type` | string | Yes | `brave`, `tavily`, or `custom` |
-| `providers[].apiKeyEnv` | string | Yes | Env var name containing API key |
+| `providers[].apiKeyEnv` | string | No | Env var name containing API key (preferred) |
+| `providers[].apiKey` | string | No | Direct API key value, `${ENV_VAR}` syntax, or path to file containing key |
 | `providers[].monthlyLimit` | number | Yes | Maximum requests per month |
 | `providers[].baseUrl` | string | No | Custom API URL (only for type=`custom` - not needed for built-in providers) |
 | `primaryProviderId` | string | No | ID of primary provider (default: first provider) |
 
 ## Built-in Providers
+
+If both `apiKeyEnv` and `apiKey` are set, `apiKeyEnv` is used first.
 
 ### Brave Search
 - Type: `brave`

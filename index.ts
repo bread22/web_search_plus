@@ -3,7 +3,8 @@ const USAGE_FILE = process.env.HOME + "/.openclaw/data/web_search_plus_usage.jso
 interface ProviderConfig {
   id: string;
   type: string;
-  apiKey: string;
+  apiKeyEnv?: string;
+  apiKey?: string;
   monthlyLimit: number;
   baseUrl?: string;
 }
@@ -72,7 +73,7 @@ const providerRegistry: ProviderRegistry = {
     const response = await fetch(baseUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, max_results: count, api_key: apiKey, ...extras }),
+      body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
     });
     
     if (!response.ok) {
@@ -145,19 +146,41 @@ function incrementUsage(providerId: string): void {
   saveUsage();
 }
 
-function getApiKey(apiKeyValue: string): string {
+function getApiKey(apiKeyValue: unknown): string {
+  if (typeof apiKeyValue !== "string") {
+    return "";
+  }
+
+  const rawValue = apiKeyValue.trim();
+  if (!rawValue) {
+    return "";
+  }
+
   const fs = require("fs");
   
-  if (apiKeyValue.startsWith("${") && apiKeyValue.endsWith("}")) {
-    const envVar = apiKeyValue.slice(2, -1);
+  if (rawValue.startsWith("${") && rawValue.endsWith("}")) {
+    const envVar = rawValue.slice(2, -1).trim();
+    if (!envVar) {
+      return "";
+    }
     return process.env[envVar] || "";
   }
   
-  if (fs.existsSync(apiKeyValue)) {
-    return fs.readFileSync(apiKeyValue, "utf-8").trim();
+  if (fs.existsSync(rawValue)) {
+    return fs.readFileSync(rawValue, "utf-8").trim();
   }
   
-  return apiKeyValue;
+  return rawValue;
+}
+
+function resolveApiKey(provider: ProviderConfig): string {
+  if (typeof provider.apiKeyEnv === "string" && provider.apiKeyEnv.trim()) {
+    const envValue = process.env[provider.apiKeyEnv.trim()];
+    if (typeof envValue === "string" && envValue.trim()) {
+      return envValue.trim();
+    }
+  }
+  return getApiKey(provider.apiKey);
 }
 
 export default function (api: {
@@ -213,9 +236,10 @@ export default function (api: {
           continue;
         }
 
-        const apiKey = getApiKey(provider.apiKey);
+        const apiKey = resolveApiKey(provider);
         if (!apiKey) {
-          api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id} (env: ${provider.apiKeyEnv})`);
+          const keySource = provider.apiKeyEnv && provider.apiKey ? `apiKeyEnv=${provider.apiKeyEnv} or apiKey` : provider.apiKeyEnv ? `apiKeyEnv=${provider.apiKeyEnv}` : "apiKey";
+          api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id} (${keySource})`);
           continue;
         }
 

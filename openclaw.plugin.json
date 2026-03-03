@@ -15,10 +15,12 @@
           "properties": {
             "id": { "type": "string" },
             "type": { "type": "string" },
+            "apiKeyEnv": { "type": "string" },
             "apiKey": { "type": "string" },
             "monthlyLimit": { "type": "number" },
             "baseUrl": { "type": "string" }
-          }
+          },
+          "required": ["id", "type", "monthlyLimit"]
         }
       },
       "primaryProviderId": { "type": "string" }
