@@ -1,31 +1,15 @@
 const USAGE_FILE = process.env.HOME + "/.openclaw/data/web_search_plus_usage.json";
-const {
-  clampCount,
-  sanitizeTimeoutMs,
-  validateCustomBaseUrl,
-  resolveApiKey,
-  sanitizeErrorMessage,
-} = require("./security");
-const {
-  DEFAULT_PROVIDER_COOLDOWN_MS,
-  sanitizeCooldownMs,
-  readUsageFile,
-  writeUsageFileAtomic,
-  isRetryableProviderError,
-  markProviderUnhealthy,
-  isProviderHealthy,
-} = require("./reliability");
+const MAX_QUERY_LENGTH = 500;
+const MAX_COUNT = 20;
+const MIN_COUNT = 1;
+const ALLOWED_PROVIDER_TYPES = new Set(["brave", "tavily", "custom"]);
 
 interface ProviderConfig {
   id: string;
   type: string;
-  apiKeyEnv?: string;
-  apiKey?: string;
+  apiKey: string;
   monthlyLimit: number;
   baseUrl?: string;
-  timeoutMs?: number;
-  cooldownMs?: number;
-  allowedHosts?: string[];
 }
 
 interface SearchFunction {
@@ -36,36 +20,17 @@ interface ProviderRegistry {
   [key: string]: SearchFunction;
 }
 
-async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), sanitizeTimeoutMs(timeoutMs));
-  try {
-    return await fetch(url, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error("Request timed out");
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 const providerRegistry: ProviderRegistry = {
   brave: async (apiKey: string, query: string, count: number, extras?: Record<string, unknown>): Promise<unknown> => {
     const params = new URLSearchParams({ q: query, count: String(count) });
     if (extras?.freshness) params.append("freshness", String(extras.freshness));
     
-    const response = await fetchWithTimeout(
-      `https://api.search.brave.com/res/v1/web/search?${params}`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Subscription-Token": apiKey,
-        },
+    const response = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
+      headers: {
+        Accept: "application/json",
+        "X-Subscription-Token": apiKey,
       },
-      extras?.timeoutMs as number,
-    );
+    });
     
     if (!response.ok) {
       throw new Error(`Brave API error: ${response.status}`);
@@ -81,16 +46,12 @@ const providerRegistry: ProviderRegistry = {
     };
   },
   
-  tavily: async (apiKey: string, query: string, count: number, extras?: Record<string, unknown>): Promise<unknown> => {
-    const response = await fetchWithTimeout(
-      "https://api.tavily.com/search",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
-      },
-      extras?.timeoutMs as number,
-    );
+  tavily: async (apiKey: string, query: string, count: number): Promise<unknown> => {
+    const response = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
+    });
     
     if (!response.ok) {
       throw new Error(`Tavily API error: ${response.status}`);
@@ -112,15 +73,11 @@ const providerRegistry: ProviderRegistry = {
       throw new Error("Custom provider requires baseUrl");
     }
     
-    const response = await fetchWithTimeout(
-      baseUrl,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
-      },
-      extras?.timeoutMs as number,
-    );
+    const response = await fetch(baseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, max_results: count, api_key: apiKey }),
+    });
     
     if (!response.ok) {
       throw new Error(`Custom provider error: ${response.status}`);
@@ -131,7 +88,6 @@ const providerRegistry: ProviderRegistry = {
 };
 
 let usageData: Record<string, { count: number; month: string }> = {};
-const providerUnhealthyUntil: Record<string, number> = {};
 
 function getCurrentMonth(): string {
   const now = new Date();
@@ -140,7 +96,18 @@ function getCurrentMonth(): string {
 
 function loadUsage(): void {
   try {
-    usageData = readUsageFile(USAGE_FILE, getCurrentMonth());
+    const fs = require("fs");
+    if (fs.existsSync(USAGE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(USAGE_FILE, "utf-8"));
+      const currentMonth = getCurrentMonth();
+      for (const [providerId, info] of Object.entries(data)) {
+        if (typeof info === "object" && info.month !== currentMonth) {
+          info.count = 0;
+          info.month = currentMonth;
+        }
+      }
+      usageData = data;
+    }
   } catch {
     usageData = {};
   }
@@ -148,7 +115,12 @@ function loadUsage(): void {
 
 function saveUsage(): void {
   try {
-    writeUsageFileAtomic(USAGE_FILE, usageData);
+    const fs = require("fs");
+    const dir = USAGE_FILE.substring(0, USAGE_FILE.lastIndexOf("/"));
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(USAGE_FILE, JSON.stringify(usageData, null, 2));
   } catch {
     // ignore
   }
@@ -177,6 +149,173 @@ function incrementUsage(providerId: string): void {
   saveUsage();
 }
 
+function getApiKey(apiKeyValue: string): string {
+  const rawValue = (apiKeyValue || "").trim();
+
+  if (!rawValue) {
+    return "";
+  }
+
+  // Support only literal values and ${ENV_VAR} indirection.
+  // File-path loading is intentionally disabled for security hardening.
+  if (rawValue.startsWith("${") && rawValue.endsWith("}")) {
+    const envVar = rawValue.slice(2, -1).trim();
+    return envVar ? (process.env[envVar] || "").trim() : "";
+  }
+
+  return rawValue;
+}
+
+function isPrivateOrLoopbackIp(hostname: string): boolean {
+  if (hostname === "::1") return true;
+  if (hostname.startsWith("fe80:")) return true;
+  if (hostname.startsWith("fc") || hostname.startsWith("fd")) return true;
+  if (hostname === "0.0.0.0") return true;
+  const ipv4Match = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4Match) return false;
+
+  const octets = ipv4Match.slice(1).map((x) => Number(x));
+  if (octets.some((x) => Number.isNaN(x) || x < 0 || x > 255)) return true;
+  const [a, b] = octets;
+
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  return false;
+}
+
+function isDisallowedHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  if (normalized === "localhost") return true;
+  if (normalized.endsWith(".localhost")) return true;
+  if (normalized === "127.0.0.1") return true;
+  if (normalized === "::1") return true;
+  return isPrivateOrLoopbackIp(normalized);
+}
+
+function validateCustomBaseUrl(
+  provider: ProviderConfig,
+  allowlist: string[],
+): { ok: true; normalizedBaseUrl: string } | { ok: false; reason: string } {
+  if (provider.type !== "custom") {
+    return { ok: true, normalizedBaseUrl: provider.baseUrl || "" };
+  }
+
+  if (!provider.baseUrl || typeof provider.baseUrl !== "string") {
+    return { ok: false, reason: "missing baseUrl" };
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(provider.baseUrl);
+  } catch {
+    return { ok: false, reason: "invalid baseUrl URL" };
+  }
+
+  if (parsed.protocol !== "https:") {
+    return { ok: false, reason: "baseUrl must use https" };
+  }
+  if (isDisallowedHost(parsed.hostname)) {
+    return { ok: false, reason: "baseUrl host is localhost/loopback/private" };
+  }
+
+  const allowed = allowlist.map((x) => x.trim().toLowerCase()).filter(Boolean);
+  if (allowed.length === 0) {
+    return { ok: false, reason: "customProviderAllowlist is empty" };
+  }
+
+  const host = parsed.host.toLowerCase();
+  const origin = parsed.origin.toLowerCase();
+  if (!allowed.includes(host) && !allowed.includes(origin)) {
+    return { ok: false, reason: `baseUrl not in customProviderAllowlist: ${host}` };
+  }
+
+  return { ok: true, normalizedBaseUrl: parsed.toString() };
+}
+
+function sanitizeQuery(raw: unknown): string {
+  if (typeof raw !== "string") return "";
+  return raw
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, MAX_QUERY_LENGTH);
+}
+
+function validateAndNormalizeProviders(
+  rawProviders: unknown,
+  customProviderAllowlist: string[],
+  logger?: { warn: (msg: string) => void },
+): ProviderConfig[] {
+  if (!Array.isArray(rawProviders)) {
+    logger?.warn("[web_search_plus] Invalid config: providers must be an array");
+    return [];
+  }
+  if (rawProviders.length < 1 || rawProviders.length > 20) {
+    logger?.warn("[web_search_plus] Invalid config: providers length must be in range 1..20");
+    return [];
+  }
+
+  const seenIds = new Set<string>();
+  const normalizedProviders: ProviderConfig[] = [];
+
+  for (const provider of rawProviders) {
+    if (typeof provider !== "object" || provider === null) {
+      logger?.warn("[web_search_plus] Skipping provider: entry must be an object");
+      continue;
+    }
+
+    const candidate = provider as Partial<ProviderConfig>;
+    const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+    const type = typeof candidate.type === "string" ? candidate.type.trim() : "";
+    const apiKey = typeof candidate.apiKey === "string" ? candidate.apiKey : "";
+    const monthlyLimit = typeof candidate.monthlyLimit === "number" ? candidate.monthlyLimit : NaN;
+    const baseUrl = typeof candidate.baseUrl === "string" ? candidate.baseUrl.trim() : undefined;
+
+    if (!id || !type || !apiKey || !Number.isFinite(monthlyLimit) || monthlyLimit < 1) {
+      logger?.warn(`[web_search_plus] Skipping provider: invalid required fields (id=${id || "<empty>"})`);
+      continue;
+    }
+    if (!ALLOWED_PROVIDER_TYPES.has(type)) {
+      logger?.warn(`[web_search_plus] Skipping provider ${id}: unsupported type (${type})`);
+      continue;
+    }
+    if (seenIds.has(id)) {
+      logger?.warn(`[web_search_plus] Skipping provider: duplicate id (${id})`);
+      continue;
+    }
+
+    const normalizedProvider: ProviderConfig = { id, type, apiKey, monthlyLimit, baseUrl };
+    const customValidation = validateCustomBaseUrl(normalizedProvider, customProviderAllowlist);
+    if (!customValidation.ok) {
+      logger?.warn(`[web_search_plus] Skipping provider ${id}: ${customValidation.reason}`);
+      continue;
+    }
+
+    if (type === "custom") {
+      normalizedProvider.baseUrl = customValidation.normalizedBaseUrl;
+    } else {
+      delete normalizedProvider.baseUrl;
+    }
+
+    normalizedProviders.push(normalizedProvider);
+    seenIds.add(id);
+  }
+
+  return normalizedProviders;
+}
+
+function normalizeCount(rawCount: unknown): number {
+  const value = typeof rawCount === "number" ? rawCount : Number(rawCount);
+  if (!Number.isFinite(value)) return 10;
+  const integer = Math.floor(value);
+  if (integer < MIN_COUNT) return MIN_COUNT;
+  if (integer > MAX_COUNT) return MAX_COUNT;
+  return integer;
+}
+
 export default function (api: {
   config: Record<string, unknown>;
   pluginConfig?: Record<string, unknown>;
@@ -186,15 +325,21 @@ export default function (api: {
   loadUsage();
 
   const config = api.pluginConfig as {
-    providers?: ProviderConfig[];
+    providers?: unknown;
     primaryProviderId?: string;
-    allowedHosts?: string[];
-    cooldownMs?: number;
+    customProviderAllowlist?: unknown;
   } | undefined;
 
-  const providers: ProviderConfig[] = config?.providers || [];
+  const customProviderAllowlist = Array.isArray(config?.customProviderAllowlist)
+    ? config?.customProviderAllowlist.filter((x): x is string => typeof x === "string")
+    : [];
+
+  const providers = validateAndNormalizeProviders(config?.providers, customProviderAllowlist, api.logger);
+  if (providers.length === 0) {
+    api.logger?.warn("[web_search_plus] No valid providers configured, web_search will always fail");
+  }
+
   const primaryProviderId = config?.primaryProviderId || providers[0]?.id;
-  const defaultCooldownMs = sanitizeCooldownMs(config?.cooldownMs, DEFAULT_PROVIDER_COOLDOWN_MS);
 
   const sortedProviders = [...providers].sort((a, b) => {
     if (a.id === primaryProviderId) return -1;
@@ -209,14 +354,14 @@ export default function (api: {
       type: "object",
       properties: {
         query: { type: "string", description: "Search query" },
-        count: { type: "number", description: "Number of results (default 10)" },
+        count: { type: "number", description: "Number of results (range 1..20, default 10)" },
         freshness: { type: "string", enum: ["day", "week", "month"], description: "Filter by freshness (Brave only)" },
       },
       required: ["query"],
     },
     async execute(_toolCallId: string, params: Record<string, unknown>) {
-      const query = typeof params.query === "string" ? params.query.trim() : "";
-      const count = clampCount(params.count);
+      const query = sanitizeQuery(params.query);
+      const count = normalizeCount(params.count);
       const freshness = typeof params.freshness === "string" ? params.freshness : undefined;
 
       if (!query) {
@@ -224,68 +369,39 @@ export default function (api: {
       }
 
       let lastError: Error | null = null;
-      const now = Date.now();
 
       for (const provider of sortedProviders) {
-        if (!isProviderHealthy(providerUnhealthyUntil, provider.id, now)) {
-          api.logger?.info(`[web_search_plus] Provider ${provider.id} in cooldown`);
-          continue;
-        }
-
         const currentUsage = getUsage(provider.id);
-        
+
         if (currentUsage >= provider.monthlyLimit) {
-          api.logger?.info(`[web_search_plus] Provider ${provider.id} at monthly limit`);
+          api.logger?.info(`[web_search_plus] Provider ${provider.id} at limit (${currentUsage}/${provider.monthlyLimit}), skipping`);
           continue;
         }
 
-        const apiKey = resolveApiKey(provider);
+        const apiKey = getApiKey(provider.apiKey);
         if (!apiKey) {
-          api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id}`);
+          api.logger?.warn(`[web_search_plus] No API key for provider ${provider.id}; skipping`);
           continue;
         }
 
         try {
           const searchFn = providerRegistry[provider.type] || providerRegistry.custom;
-          const timeoutMs = sanitizeTimeoutMs(provider.timeoutMs);
-          const extras =
-            provider.type === "custom"
-              ? {
-                  baseUrl: validateCustomBaseUrl(provider.baseUrl, config?.allowedHosts, provider.allowedHosts),
-                  timeoutMs,
-                }
-              : { freshness, timeoutMs };
-          
+          const extras = provider.type === "custom" ? { baseUrl: provider.baseUrl } : { freshness };
+
           const result = await searchFn(apiKey, query, count, extras);
 
           incrementUsage(provider.id);
-          delete providerUnhealthyUntil[provider.id];
-          api.logger?.info(`[web_search_plus] Used ${provider.id}`);
+          api.logger?.info(`[web_search_plus] Used ${provider.id}, count: ${getUsage(provider.id)}/${provider.monthlyLimit}`);
 
           return { content: [{ type: "text", text: JSON.stringify({ provider: provider.id, query, ...(result as object) }, null, 2) }] };
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
-          api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${sanitizeErrorMessage(lastError)}`);
-          if (isRetryableProviderError(lastError)) {
-            const cooldownUntil = markProviderUnhealthy(
-              providerUnhealthyUntil,
-              provider.id,
-              sanitizeCooldownMs(provider.cooldownMs, defaultCooldownMs),
-            );
-            api.logger?.warn(`[web_search_plus] ${provider.id} marked unhealthy until ${new Date(cooldownUntil).toISOString()}`);
-          }
+          api.logger?.warn(`[web_search_plus] ${provider.id} failed: ${lastError.message}`);
           continue;
         }
       }
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ error: "All providers failed or at limit", lastError: lastError ? sanitizeErrorMessage(lastError) : undefined }),
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: JSON.stringify({ error: "All providers failed or at limit", lastError: lastError?.message }) }] };
     },
   });
 

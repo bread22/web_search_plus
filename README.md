@@ -7,9 +7,11 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 - **Multi-provider support**: Configure multiple search providers (Brave, Tavily, or custom)
 - **Automatic fallback**: When primary provider hits limit, automatically falls back to next provider
 - **Monthly usage tracking**: Usage resets automatically at the start of each month
-- **Failure cooldown**: Providers that fail with timeout/429/5xx are temporarily skipped
 - **Extensible**: Add any HTTP-based search API as a custom provider
-- **Flexible auth config**: API keys can come from `apiKeyEnv` or `apiKey` (literal value, `${ENV_VAR}`, or file path)
+- **Secure defaults**:
+  - API keys support only literal values or `${ENV_VAR}`
+  - File-path API key loading is disabled
+  - Custom provider `baseUrl` must be HTTPS, non-local/private, and allowlisted
 
 ## Installation
 
@@ -29,17 +31,18 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
         "enabled": true,
         "config": {
           "primaryProviderId": "brave",
+          "customProviderAllowlist": ["https://api.mysearch.com", "api.mysearch.com"],
           "providers": [
             {
               "id": "brave",
               "type": "brave",
-              "apiKeyEnv": "BRAVE_API_KEY",
+              "apiKey": "${BRAVE_API_KEY}",
               "monthlyLimit": 1000
             },
             {
               "id": "tavily",
               "type": "tavily",
-              "apiKeyEnv": "TAVILY_API_KEY",
+              "apiKey": "${TAVILY_API_KEY}",
               "monthlyLimit": 1000
             }
           ]
@@ -85,23 +88,21 @@ Multi-provider web search plugin for OpenClaw with automatic fallback and monthl
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `providers` | array | Yes | List of search providers |
+| `providers` | array | Yes | List of search providers (must contain 1..20 entries) |
 | `providers[].id` | string | Yes | Unique identifier for this provider |
 | `providers[].type` | string | Yes | `brave`, `tavily`, or `custom` |
-| `providers[].apiKeyEnv` | string | No | Env var name containing API key (preferred) |
-| `providers[].apiKey` | string | No | Direct API key value, `${ENV_VAR}` syntax, or path to file containing key |
+| `providers[].apiKey` | string | Yes | Literal API key or `${ENV_VAR}` |
 | `providers[].monthlyLimit` | number | Yes | Maximum requests per month |
-| `providers[].baseUrl` | string | No | Custom API URL (only for type=`custom` - not needed for built-in providers) |
-| `providers[].timeoutMs` | number | No | Provider request timeout in milliseconds (default: 8000) |
-| `providers[].cooldownMs` | number | No | Override failure cooldown for this provider in milliseconds |
-| `providers[].allowedHosts` | string[] | No | Provider-level allowlist for custom provider hostnames (overrides global allowlist when set) |
+| `providers[].baseUrl` | string | No | Custom API URL (required for `type=custom`) |
+| `customProviderAllowlist` | array | For custom providers | Allowed host/origin values for custom `baseUrl` |
 | `primaryProviderId` | string | No | ID of primary provider (default: first provider) |
-| `cooldownMs` | number | No | Global failure cooldown in milliseconds (default: 30000) |
-| `allowedHosts` | string[] | No | Global allowlist for custom provider hostnames |
+
+Runtime behavior:
+- Empty API keys are skipped with a warning.
+- `count` input is clamped to `1..20`.
+- Queries are sanitized (control chars stripped, whitespace normalized, length limited).
 
 ## Built-in Providers
-
-If both `apiKeyEnv` and `apiKey` are set, `apiKeyEnv` is used first.
 
 ### Brave Search
 - Type: `brave`
@@ -121,11 +122,16 @@ Add any HTTP-based search API:
 {
   "id": "my-custom",
   "type": "custom",
-  "apiKeyEnv": "MY_API_KEY",
+  "apiKey": "${MY_API_KEY}",
   "monthlyLimit": 500,
   "baseUrl": "https://api.mysearch.com/search"
 }
 ```
+
+Security rules for custom providers:
+- `baseUrl` must use `https://`
+- `baseUrl` host cannot be localhost, loopback, or private IP ranges
+- `baseUrl` host or origin must appear in `customProviderAllowlist`
 
 The custom provider sends POST request with:
 ```json
@@ -135,11 +141,6 @@ The custom provider sends POST request with:
   "api_key": "your-key"
 }
 ```
-
-Security behavior:
-- `baseUrl` must use `https://`
-- if `allowedHosts` is configured (global or provider-level), hostname must be on the allowlist
-- `count` is clamped to `1..20`
 
 ## Usage
 
@@ -153,11 +154,12 @@ The plugin automatically replaces the built-in `web_search` tool. Usage:
 ## Usage Tracking
 
 Usage is stored in `~/.openclaw/data/web_search_plus_usage.json` and resets automatically at the start of each month.
-Writes are atomic (temp file + rename), and invalid/corrupt usage JSON is ignored safely.
 
-## Failure Cooldown
+## Migration Notes (Security Hardening)
 
-On timeout, HTTP `429`, or HTTP `5xx` provider errors, the failing provider is marked temporarily unhealthy and skipped for the configured cooldown window. The plugin keeps fallback behavior and continues trying the next configured provider.
+- Replace any `apiKeyEnv` fields with `apiKey: "${ENV_VAR_NAME}"`.
+- Remove any config that used an API key file path; file-path key loading is no longer supported.
+- If using `type: "custom"`, add `customProviderAllowlist` and ensure each `baseUrl` is HTTPS and allowlisted.
 
 ## License
 

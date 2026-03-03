@@ -9,29 +9,23 @@
     "properties": {
       "providers": {
         "type": "array",
+        "minItems": 1,
+        "maxItems": 20,
         "items": {
           "type": "object",
           "additionalProperties": true,
           "properties": {
             "id": { "type": "string" },
-            "type": { "type": "string" },
-            "apiKeyEnv": { "type": "string" },
+            "type": { "type": "string", "enum": ["brave", "tavily", "custom"] },
             "apiKey": { "type": "string" },
             "monthlyLimit": { "type": "number" },
-            "baseUrl": { "type": "string" },
-            "timeoutMs": { "type": "number" },
-            "cooldownMs": { "type": "number" },
-            "allowedHosts": {
-              "type": "array",
-              "items": { "type": "string" }
-            }
+            "baseUrl": { "type": "string" }
           },
-          "required": ["id", "type", "monthlyLimit"]
+          "required": ["id", "type", "apiKey", "monthlyLimit"]
         }
       },
       "primaryProviderId": { "type": "string" },
-      "cooldownMs": { "type": "number" },
-      "allowedHosts": {
+      "customProviderAllowlist": {
         "type": "array",
         "items": { "type": "string" }
       }
